@@ -110,6 +110,83 @@ For example, with two GPUs and two paths:
     feature is most useful when you cannot or do not want to reconfigure
     the block devices — for example, when they already have other data.
 
+.. _local-storage-write-admission:
+
+Reducing SSD Wear with Write Admission
+--------------------------------------
+
+By default every KV chunk LMCache produces is written to disk. In most serving
+workloads the large majority of chunks are never read back, so those writes
+consume flash endurance (measured in **DWPD**, drive writes per day) without
+ever returning a cache hit.
+
+The *reuse admission filter* only writes a chunk to disk once it has proven
+that it is reused. A chunk is not written the first time it is offered for
+storage; it is written once it has been offered ``admission_min_reuse`` further
+times. A repeat offer means the chunk was recomputed after falling out of every
+tier, which is direct evidence that its prefix is reused with a reuse distance
+longer than RAM residency — exactly the chunks the disk tier exists for.
+Single-use chunks, typically the bulk of the traffic, are never written at all.
+
+The trade-off is explicit and bounded: each admitted chunk costs exactly one
+extra prefill (the recompute that proves its reuse). Reuse that stays within
+RAM residency is served by the RAM tier as before and is unaffected.
+
+The filter is **disabled by default**. Enable it by setting
+``admission_min_reuse``:
+
+.. code-block:: yaml
+
+    local_disk: "file:///local/disk_test/local_disk/"
+    max_local_disk_size: 500.0
+
+    extra_config:
+      admission_min_reuse: 1
+
+Or via the environment:
+
+.. code-block:: bash
+
+    export LMCACHE_EXTRA_CONFIG='{"admission_min_reuse": 1}'
+
+.. list-table::
+   :widths: 30 15 55
+   :header-rows: 1
+
+   * - ``extra_config`` key
+     - Default
+     - Description
+   * - ``admission_min_reuse``
+     - ``0``
+     - Store offers beyond the first that a chunk must accumulate before it is
+       written. ``0`` disables the filter. ``1`` means "write on the second
+       offer". Values above ``1`` cost one recompute each and are rarely
+       worthwhile.
+   * - ``admission_backends``
+     - ``["LocalDiskBackend"]``
+     - Backend class names the filter gates. ``PDBackend``, ``P2PBackend`` and
+       ``LocalCPUBackend`` are rejected: the first two are KV transfer
+       mechanisms where a suppressed write is lost data, and the last is the
+       tier where chunks earn admission.
+   * - ``admission_history_size``
+     - ``1048576``
+     - Number of chunk-history slots, rounded up to a power of two. Each slot
+       costs 5 bytes, so the default table is 5 MiB. Size it to cover the reuse
+       distance you care about.
+
+Whether this pays off is workload-specific: it helps most when few chunks are
+ever reused, and helps little when most already are. The filter logs its own
+effectiveness every 100,000 store offers so you can measure it:
+
+.. code-block:: text
+
+    Reuse admission filter: wrote 12043 of 200000 offered chunks (6.0%),
+    avoiding 187957 writes to ['LocalDiskBackend'].
+
+That percentage is the multiplier to apply to your baseline DWPD. See
+``docs/design/v1/storage_backend/write-admission.md`` for the model behind it
+and guidance on choosing a value.
+
 Local Storage Explanation:
 --------------------------
 
