@@ -43,6 +43,7 @@ from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
 )
+from lmcache.v1.storage_backend.admission_policy import create_admission_policy
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
@@ -118,6 +119,37 @@ def allocate_and_copy_objects(
     if stream is not None:
         stream.synchronize()
     return allocated_keys, allocated_objects
+
+
+def select_admitted_objects(
+    keys: Sequence[CacheEngineKey],
+    memory_objs: list[MemoryObj],
+    admitted: set[CacheEngineKey],
+) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
+    """
+    Narrow a (keys, memory_objs) pair down to the admitted keys.
+
+    Args:
+        keys: the cache engine keys about to be submitted to a backend
+        memory_objs: the memory objects corresponding to `keys`
+        admitted: the keys the admission policy allows to be written
+
+    Returns:
+        - the subset of `keys` present in `admitted`
+        - the memory objects corresponding to that subset
+
+    Note:
+        Reference counts are untouched: the caller still owns every object in
+        `memory_objs` and remains responsible for releasing all of them.
+    """
+    selected = [
+        (key, memory_obj)
+        for key, memory_obj in zip(keys, memory_objs, strict=False)
+        if key in admitted
+    ]
+    if len(selected) == len(memory_objs):
+        return keys, memory_objs
+    return [key for key, _ in selected], [obj for _, obj in selected]
 
 
 class WeightedSemaphore:
@@ -285,6 +317,9 @@ class StorageManager:
         self._bypassed_backends: set[str] = set()
         self._bypass_lock = threading.RLock()
 
+        # Gates writes to wear-sensitive backends; disabled by default.
+        self.admission_policy = create_admission_policy(config)
+
         if not self.enable_pd and self.config.enable_async_loading:
             assert self.allocator_backend is not None
             self.async_serializer = AsyncSingleSerializer(self.loop)
@@ -409,6 +444,13 @@ class StorageManager:
             memory_objs,
         )
 
+        # Decided once per store so that every guarded backend sees the same
+        # verdict and a chunk's reuse counter advances once per offer.
+        guarded_backends = self.admission_policy.guarded_backends
+        admitted: set[CacheEngineKey] = (
+            self.admission_policy.admit(keys) if guarded_backends else set()
+        )
+
         for backend_name, backend in self.storage_backends.items():
             if location and backend_name != location:
                 continue
@@ -428,6 +470,10 @@ class StorageManager:
             # NOTE: the handling of exists_in_put_tasks
             # is done in the backend
             ks, objs = obj_dict[cname]
+            if backend_name in guarded_backends:
+                ks, objs = select_admitted_objects(ks, objs, admitted)
+                if not ks:
+                    continue
             backend.batched_submit_put_task(ks, objs, transfer_spec=transfer_spec)
 
         for cname, (ks, objs) in obj_dict.items():
