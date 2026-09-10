@@ -390,6 +390,24 @@ def test_prometheus_logger_get_or_create_with_config(
         assert bucket_val in upper_bounds
 
 
+@pytest.mark.parametrize(
+    "metric_attr",
+    [
+        "ephemeral_veto_chunks_count",
+        "ephemeral_veto_matched_chunks_count",
+        "ephemeral_veto_malformed_count",
+    ],
+)
+def test_ephemeral_veto_gauges_are_reachable(_cleanup_prometheus_logger, metric_attr):
+    # StorageManager wires these by getattr, so a rename breaks it silently.
+    prom = PrometheusLogger.GetOrCreate(_make_metadata())
+
+    gauge = getattr(prom, metric_attr)
+    gauge.set_function(lambda: 7)
+
+    assert gauge is not None
+
+
 def test_prometheus_logger_get_or_create_allows_multiple_roles(
     _cleanup_prometheus_logger,
 ):

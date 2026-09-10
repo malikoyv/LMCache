@@ -1092,6 +1092,7 @@ class LMCacheConnectorV1Impl:
                     offset=skip_leading_tokens,
                     sync=is_first,
                     req_id=request.req_id,
+                    request_configs=request.request_configs,
                 )
                 self._layerwise_save_storers[request.req_id] = layerwise_storer
                 if is_first:

@@ -1556,6 +1556,36 @@ class PrometheusLogger:
                 multiprocess_mode="sum",
             )
 
+        # Ephemeral write veto metrics (dynamic)
+        self._create_dynamic_gauge(
+            name="lmcache:ephemeral_veto_chunks_count",
+            documentation=(
+                "Chunks offered to wear-sensitive backends while the ephemeral "
+                "write veto was observing or enforcing"
+            ),
+            labelnames=labelnames,
+            multiprocess_mode="sum",
+        )
+        self._create_dynamic_gauge(
+            name="lmcache:ephemeral_veto_matched_chunks_count",
+            documentation=(
+                "Chunks whose request declared a lifetime below the threshold. "
+                "Skipped when enforcing; the projected saving when observing"
+            ),
+            labelnames=labelnames,
+            multiprocess_mode="sum",
+        )
+        self._create_dynamic_gauge(
+            name="lmcache:ephemeral_veto_malformed_count",
+            documentation=(
+                "Puts carrying a lifetime declaration that could not be parsed. "
+                "These were stored durably; non-zero means a client is tagging "
+                "incorrectly"
+            ),
+            labelnames=labelnames,
+            multiprocess_mode="sum",
+        )
+
         # Chunk statistics metrics (dynamic)
         self._create_dynamic_gauge(
             name="lmcache:chunk_statistics_enabled",

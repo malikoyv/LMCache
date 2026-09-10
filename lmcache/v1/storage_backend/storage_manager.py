@@ -43,7 +43,10 @@ from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
 )
-from lmcache.v1.storage_backend.admission_policy import create_admission_policy
+from lmcache.v1.storage_backend.admission_policy import (
+    create_admission_policy,
+    create_ephemeral_veto,
+)
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 if TYPE_CHECKING:
@@ -317,8 +320,9 @@ class StorageManager:
         self._bypassed_backends: set[str] = set()
         self._bypass_lock = threading.RLock()
 
-        # Gates writes to wear-sensitive backends; disabled by default.
+        # Gates writes to wear-sensitive backends; both disabled by default.
         self.admission_policy = create_admission_policy(config)
+        self.ephemeral_veto = create_ephemeral_veto(config)
 
         if not self.enable_pd and self.config.enable_async_loading:
             assert self.allocator_backend is not None
@@ -345,6 +349,16 @@ class StorageManager:
                     EventType.LOADING, s
                 )
             )
+
+        veto_metric_map = {
+            "ephemeral_veto_chunks_count": lambda s: s.chunks,
+            "ephemeral_veto_matched_chunks_count": lambda s: s.matched_chunks,
+            "ephemeral_veto_malformed_count": lambda s: s.malformed,
+        }
+
+        for metric_name, read in veto_metric_map.items():
+            metric = getattr(prometheus_logger, metric_name)
+            metric.set_function(lambda r=read: r(self.ephemeral_veto.stats()))
 
     def _get_allocator_backend(
         self, config: LMCacheEngineConfig
@@ -424,12 +438,18 @@ class StorageManager:
         memory_objs: List[MemoryObj],
         transfer_spec=None,
         location: Optional[str] = None,
+        request_configs: Optional[dict] = None,
     ) -> None:
         """
         Non-blocking function to batched put the memory objects into the
         storage backends.
         Do not store if the same object is being stored (handled here by
         storage manager) or has been stored (handled by storage backend).
+
+        :param request_configs: The originating request's ``lmcache.*`` config
+            dict, used to honour a caller-declared KV lifetime. When the
+            declared lifetime is too short to outlive the RAM tier, the
+            wear-sensitive backends are skipped for this store only.
         """
         # The dictionary from backend cname to objects and keys
         obj_dict: dict[
@@ -445,10 +465,17 @@ class StorageManager:
         )
 
         # Decided once per store so that every guarded backend sees the same
-        # verdict and a chunk's reuse counter advances once per offer.
+        # verdict and a chunk's reuse counter advances once per offer. The
+        # reuse filter still records the offer when the veto fires: the chunk
+        # was genuinely produced, so a later durable request should benefit.
         guarded_backends = self.admission_policy.guarded_backends
         admitted: set[CacheEngineKey] = (
             self.admission_policy.admit(keys) if guarded_backends else set()
+        )
+        vetoed_backends = (
+            self.ephemeral_veto.guarded_backends
+            if self.ephemeral_veto.evaluate_put(request_configs, len(keys))
+            else frozenset()
         )
 
         for backend_name, backend in self.storage_backends.items():
@@ -458,6 +485,9 @@ class StorageManager:
             with self._bypass_lock:
                 if backend_name in self._bypassed_backends:
                     continue
+            # Checked before allocating, so a vetoed store pays no copy either.
+            if backend_name in vetoed_backends:
+                continue
 
             allocator_backend = backend.get_allocator_backend()
             cname = get_backend_cname(allocator_backend)

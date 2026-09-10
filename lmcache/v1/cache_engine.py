@@ -566,6 +566,7 @@ class LMCacheEngine:
                 memory_objs,
                 transfer_spec=transfer_spec,
                 location=self.store_location,
+                request_configs=request_configs,
             )
 
         self.stats_monitor.on_store_finished(
@@ -752,7 +753,10 @@ class LMCacheEngine:
                 yield
                 next(mem_obj_generator)
                 self.storage_manager.batched_put(
-                    keys[layer_id], memory_objs[layer_id], location=self.store_location
+                    keys[layer_id],
+                    memory_objs[layer_id],
+                    location=self.store_location,
+                    request_configs=request_configs,
                 )
 
             tot_time = time.perf_counter() - t_start
